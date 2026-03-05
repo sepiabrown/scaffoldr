@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# git config core.excludesFile .local_gitignore
+.local_gitignore 
