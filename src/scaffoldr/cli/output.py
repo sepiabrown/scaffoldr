@@ -155,13 +155,16 @@ def _write_text_files(
     package_names: set[str],
     verbose: bool = False,
     facade_leaks: dict[str, Any] | None = None,
+    top_coupling: int | None = None,
 ) -> None:
     """Write all text-format output files and optionally print summary to stdout."""
     dep_text = format_dependency_text(dep_graph)
     dep_mermaid = format_dependency_mermaid(dep_graph, package_names)
     class_text = format_class_tree_text(class_hier)
     ep_text = format_entry_points_text(ep_map)
-    coupling_text = format_coupling_density_text(coupling, package_names)
+    coupling_text = format_coupling_density_text(
+        coupling, package_names, top_n=top_coupling
+    )
     leaks_text = ""
     if facade_leaks and facade_leaks.get("total_leaks", 0) > 0:
         leaks_text = format_facade_leaks_text(facade_leaks, package_names)
@@ -242,6 +245,7 @@ def write_outputs(
     package_names: set[str],
     verbose: bool = False,
     facade_leaks: dict[str, Any] | None = None,
+    top_coupling: int | None = None,
 ) -> None:
     """Write all output files based on requested formats.
 
@@ -290,6 +294,7 @@ def write_outputs(
             package_names,
             verbose=verbose,
             facade_leaks=facade_leaks,
+            top_coupling=top_coupling,
         )
 
     if verbose:

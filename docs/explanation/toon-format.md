@@ -50,7 +50,7 @@ scaffoldr outputs the same data in three formats. Each serves a different purpos
 
 - **TOON** (`--toon`) — feeding structural data to an LLM where token budget matters. This is the primary use case for scaffoldr.
 - **JSON** (`--json`) — programmatic access, scripting, tooling integration. Parse it with any JSON library.
-- **Text** (default) — human reading. A prose summary with the key findings, suitable for quick orientation at the start of a conversation.
+- **Text** (`--full` or `--toon`) — human reading. A prose summary with the key findings, suitable for quick orientation at the start of a conversation. Without flags, only `facade_leaks.txt` is produced.
 
 All three contain the same structural data — modules, classes, entry points, cross-boundary calls — just encoded differently.
 

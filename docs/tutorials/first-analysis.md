@@ -44,11 +44,12 @@ Structural Analysis: my-workspace
   [OK] class_hierarchy.txt
   [OK] entry_points.txt
   [OK] coupling_density.txt
+  [OK] facade_leaks.txt
 
 [DONE] Structural analysis complete!
 ```
 
-The output directory (`.scaffoldr/` by default) now contains 7 files.
+The output directory (`.scaffoldr/` by default) now contains 8 files.
 
 ## Step 2: Read the summary
 

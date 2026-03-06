@@ -33,11 +33,11 @@ Each call line is indented 2 spaces.
 ### Filtering
 
 - Only **cross-boundary** calls are shown: source subpackage ≠ target subpackage. Calls within a subpackage are excluded.
-- Subpackage is the first 2 levels of the module path (e.g., `scaffoldr.core.graphs` → `scaffoldr.core`).
+- Subpackage boundaries are determined by facade zones — the deepest `__init__.py`-bearing ancestor of each module.
 - Calls to `self.*` are excluded (internal to the class).
 - Python builtins (`len`, `str`, `isinstance`, `print`, etc.) are excluded.
 - Duplicate caller→callee pairs within the same boundary are deduplicated.
-- At most 50 boundary pairs are shown. If more exist, a summary line reports the remainder.
+- By default, all boundary pairs are shown. Use `--top-coupling N` to limit to the top N pairs; a summary line reports the remainder.
 
 ### Sorting
 

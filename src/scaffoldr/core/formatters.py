@@ -249,12 +249,17 @@ def format_toon(full_data: dict[str, Any]) -> str:
 
 
 def format_coupling_density_text(
-    coupling: dict[str, Any], package_names: set[str], top_n: int = 50
+    coupling: dict[str, Any],
+    package_names: set[str],
+    top_n: int | None = None,
 ) -> str:
-    """Format cross-boundary calls as compressed text (ELD view).
+    """Format cross-boundary calls as text (ELD view).
 
-    Shows the top *top_n* most-coupled boundary pairs with their individual
-    caller->callee relationships.
+    Shows boundary pairs with their individual caller->callee
+    relationships, sorted by call count (most coupled first).
+
+    When *top_n* is None (default), all pairs are shown.
+    When set, only the top *top_n* pairs are shown with a summary tail.
     """
     boundaries = coupling.get("boundaries", [])
     if not boundaries:
@@ -267,7 +272,8 @@ def format_coupling_density_text(
         "",
     ]
 
-    for b in boundaries[:top_n]:
+    shown = boundaries if top_n is None else boundaries[:top_n]
+    for b in shown:
         src = shorten_module(b["source"], package_names, keep_root=True)
         tgt = shorten_module(b["target"], package_names, keep_root=True)
         n = len(b["calls"])
@@ -276,7 +282,7 @@ def format_coupling_density_text(
             lines.append(f"  {c['caller']} -> {c['callee']}")
         lines.append("")
 
-    if len(boundaries) > top_n:
+    if top_n is not None and len(boundaries) > top_n:
         remaining = len(boundaries) - top_n
         remaining_calls = sum(len(b["calls"]) for b in boundaries[top_n:])
         lines.append(

@@ -20,6 +20,10 @@ class AnalyzeCommand(TypedDict):
     output_dir: Path  # resolved absolute path
     formats: set[str]  # subset of {"text", "json", "toon"}
     verbose: bool  # print progress and summary to stdout
+    top_coupling: (
+        int | None
+    )  # limit coupling density to top N boundary pairs (None = all)
+    top_n: int | None  # truncate coupling density to top N pairs (None = all)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -65,6 +69,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Print progress and summary to stdout (default: quiet)",
+    )
+    analyze.add_argument(
+        "--top-coupling",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Show only top N most-coupled boundary pairs (default: all)",
     )
 
     return parser
@@ -143,4 +154,5 @@ def parse_args(argv: list[str] | None = None) -> AnalyzeCommand:
         output_dir=output_dir,
         formats=formats,
         verbose=args.verbose,
+        top_coupling=args.top_coupling,
     )

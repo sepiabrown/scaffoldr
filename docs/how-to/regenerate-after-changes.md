@@ -12,15 +12,15 @@ scaffoldr analyze . --full
 
 This overwrites all files in `.scaffoldr/` with fresh output.
 
-## Regenerate text files only
+## Regenerate facade leaks only
 
-If you only need the compressed summaries (not JSON or TOON):
+If you only need to check facade hygiene:
 
 ```bash
 scaffoldr analyze .
 ```
 
-This writes the 5 text files without the heavier JSON and TOON outputs.
+This writes only `facade_leaks.txt` — the default output with no flags.
 
 ## Regenerate to a different directory
 

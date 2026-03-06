@@ -37,6 +37,7 @@ def _analyze(cmd: AnalyzeCommand) -> None:
     output_dir = cmd["output_dir"]
     formats = cmd["formats"]
     verbose = cmd["verbose"]
+    top_coupling = cmd["top_coupling"]
 
     # Detect language and run language-specific analysis
     lang = detect_language(workspace_root)
@@ -100,6 +101,7 @@ def _analyze(cmd: AnalyzeCommand) -> None:
         metadata=metadata,
         package_names=package_names,
         verbose=verbose,
+        top_coupling=top_coupling,
     )
 
 
