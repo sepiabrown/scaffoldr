@@ -4,10 +4,10 @@ import sys
 import tomllib
 from pathlib import Path
 
-__all__ = ["discover_workspace", "discover_modules"]
+__all__ = ["_discover_workspace", "_discover_modules"]
 
 
-def discover_workspace(workspace_root: Path) -> tuple[dict[str, str], dict[str, str]]:
+def _discover_workspace(workspace_root: Path) -> tuple[dict[str, str], dict[str, str]]:
     """Discover packages and entry points from pyproject.toml files.
 
     Returns:
@@ -105,7 +105,7 @@ def discover_workspace(workspace_root: Path) -> tuple[dict[str, str], dict[str, 
     return packages, entry_points
 
 
-def discover_modules(workspace_root: Path, packages: dict[str, str]) -> dict[str, Path]:
+def _discover_modules(workspace_root: Path, packages: dict[str, str]) -> dict[str, Path]:
     """Discover all Python modules in the project packages."""
     modules: dict[str, Path] = {}
     for pkg_name, pkg_rel_path in packages.items():

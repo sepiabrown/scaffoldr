@@ -9,17 +9,17 @@ from __future__ import annotations
 
 import sys
 
-from .cli.parser import AnalyzeCommand, parse_args
-from .cli.output import print_analysis_progress, print_graph_progress, write_outputs
-from .langs import detect_language
-from .core.graphs import (
+from .cli import AnalyzeCommand, parse_args, print_analysis_progress, print_graph_progress, write_outputs
+from .core import (
     generate_dependency_graph,
     generate_class_hierarchy,
     generate_entry_point_map,
     generate_coupling_density,
     generate_facade_leaks,
     build_facade_exports,
+    detect_cycles,
 )
+from .langs import detect_language, get_analyzer
 
 
 def main() -> None:
@@ -42,13 +42,8 @@ def _analyze(cmd: AnalyzeCommand) -> None:
     # Detect language and run language-specific analysis
     lang = detect_language(workspace_root)
 
-    if lang == "python":
-        from .langs.python import analyze as analyze_python
-
-        result = analyze_python(workspace_root)
-    else:
-        print(f"Unsupported language: {lang}", file=sys.stderr)
-        sys.exit(1)
+    analyze_fn = get_analyzer(lang)
+    result = analyze_fn(workspace_root)
 
     workspace_name = result["workspace_name"]
     package_names = set(result["packages"].keys())
@@ -77,10 +72,11 @@ def _analyze(cmd: AnalyzeCommand) -> None:
     facade_leaks = generate_facade_leaks(
         result["all_analysis"], result["all_trees"], facade_exports
     )
+    cycles = detect_cycles(dep_graph)
 
     # Progress: artifact generation
     if verbose:
-        print_graph_progress(dep_graph, class_hier, ep_map, coupling, facade_leaks)
+        print_graph_progress(dep_graph, class_hier, ep_map, coupling, facade_leaks, cycles=cycles)
 
     # Write outputs
     metadata = {
@@ -98,6 +94,7 @@ def _analyze(cmd: AnalyzeCommand) -> None:
         ep_map=ep_map,
         coupling=coupling,
         facade_leaks=facade_leaks,
+        cycles=cycles,
         metadata=metadata,
         package_names=package_names,
         verbose=verbose,

@@ -12,6 +12,7 @@ __all__ = [
     "generate_coupling_density",
     "generate_facade_leaks",
     "build_facade_exports",
+    "detect_cycles",
     "CallCollector",
     "find_function_calls",
 ]
@@ -687,3 +688,121 @@ def generate_coupling_density(
     boundaries.sort(key=lambda b: len(b["calls"]), reverse=True)
 
     return {"boundaries": boundaries}
+
+
+def detect_cycles(dep_graph: dict[str, Any]) -> dict[str, Any]:
+    """Detect circular dependencies in the package-level dependency graph.
+
+    Uses Tarjan's algorithm (iterative) to find strongly connected components
+    (SCCs).  An SCC with more than one node is a cycle.
+
+    Parameters:
+        dep_graph: Output from generate_dependency_graph() — must have
+                   "package_level" key with {node: [deps]} adjacency list.
+
+    Returns:
+        {"cycles": [{"nodes": [str], "edges": [{"from": str, "to": str}]}],
+         "total_cycles": int,
+         "total_nodes_in_cycles": int}
+    """
+    pkg_level: dict[str, list[str]] = dep_graph.get("package_level", {})
+
+    # Collect all nodes (sources and targets)
+    all_nodes: set[str] = set(pkg_level.keys())
+    for dsts in pkg_level.values():
+        all_nodes.update(dsts)
+
+    # Adjacency list (default to empty for sink nodes)
+    adj: dict[str, list[str]] = {n: list(pkg_level.get(n, [])) for n in all_nodes}
+
+    # --- Iterative Tarjan's algorithm ---
+    index_counter = 0
+    node_index: dict[str, int] = {}
+    node_lowlink: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    sccs: list[list[str]] = []
+
+    # Each frame: (node, neighbor_list, neighbor_index, phase)
+    # phase 0 = initial visit, phase 1 = returning from recursive call
+    INITIAL = 0
+    RESUME = 1
+
+    for start in sorted(all_nodes):
+        if start in node_index:
+            continue
+
+        call_stack: list[tuple[str, list[str], int, int]] = [
+            (start, adj[start], 0, INITIAL)
+        ]
+
+        while call_stack:
+            node, neighbors, ni, phase = call_stack.pop()
+
+            if phase == INITIAL:
+                node_index[node] = index_counter
+                node_lowlink[node] = index_counter
+                index_counter += 1
+                stack.append(node)
+                on_stack.add(node)
+
+            if phase == RESUME:
+                # Returning from visiting neighbors[ni-1]
+                child = neighbors[ni - 1]
+                if node_lowlink[child] < node_lowlink[node]:
+                    node_lowlink[node] = node_lowlink[child]
+
+            # Continue iterating through neighbors
+            pushed = False
+            while ni < len(neighbors):
+                w = neighbors[ni]
+                ni += 1
+                if w not in node_index:
+                    # Push current frame (to resume after w is processed)
+                    call_stack.append((node, neighbors, ni, RESUME))
+                    # Push new frame for w
+                    call_stack.append((w, adj[w], 0, INITIAL))
+                    pushed = True
+                    break
+                elif w in on_stack:
+                    if node_index[w] < node_lowlink[node]:
+                        node_lowlink[node] = node_index[w]
+
+            if pushed:
+                continue
+
+            # All neighbors processed — check if node is an SCC root
+            if node_lowlink[node] == node_index[node]:
+                scc: list[str] = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    scc.append(w)
+                    if w == node:
+                        break
+                if len(scc) > 1:
+                    sccs.append(scc)
+
+    # --- Build result ---
+    cycles: list[dict[str, Any]] = []
+    for scc in sccs:
+        scc_set = set(scc)
+        nodes_sorted = sorted(scc)
+        # Collect internal edges (both endpoints in the SCC)
+        edges: list[dict[str, str]] = []
+        for src in nodes_sorted:
+            for dst in sorted(adj.get(src, [])):
+                if dst in scc_set:
+                    edges.append({"from": src, "to": dst})
+        cycles.append({"nodes": nodes_sorted, "edges": edges})
+
+    # Sort cycles by size (largest first)
+    cycles.sort(key=lambda c: len(c["nodes"]), reverse=True)
+
+    total_nodes = sum(len(c["nodes"]) for c in cycles)
+
+    return {
+        "cycles": cycles,
+        "total_cycles": len(cycles),
+        "total_nodes_in_cycles": total_nodes,
+    }

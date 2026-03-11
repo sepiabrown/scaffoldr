@@ -11,16 +11,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..core.formatters import (
+from ..core import (
+    AnalysisResult,
     format_coupling_density_text,
     format_class_tree_text,
+    format_cycles_mermaid,
+    format_cycles_text,
     format_dependency_mermaid,
     format_dependency_text,
     format_entry_points_text,
     format_facade_leaks_text,
     format_toon,
 )
-from ..core.types import AnalysisResult
 
 
 def print_analysis_progress(workspace_name: str, result: AnalysisResult) -> None:
@@ -52,6 +54,7 @@ def print_graph_progress(
     ep_map: dict[str, Any],
     coupling: dict[str, Any],
     facade_leaks: dict[str, Any] | None = None,
+    cycles: dict[str, Any] | None = None,
 ) -> None:
     """Print ``[3/4]`` artifact generation progress."""
     n_pkg_edges = len(dep_graph["package_level"])
@@ -60,6 +63,7 @@ def print_graph_progress(
     n_boundaries = len(coupling["boundaries"])
     n_coupling = sum(len(b["calls"]) for b in coupling["boundaries"])
     n_facade_leaks = facade_leaks.get("total_leaks", 0) if facade_leaks else 0
+    n_cycles = cycles.get("total_cycles", 0) if cycles else 0
 
     print("\n[3/4] Generating artifacts...")
     print(f"  Dependency graph: {n_pkg_edges} package edges")
@@ -71,9 +75,14 @@ def print_graph_progress(
     )
     if n_facade_leaks > 0:
         print(f"  Facade leaks: {n_facade_leaks}")
+    if n_cycles > 0 and cycles is not None:
+        n_nodes = cycles.get("total_nodes_in_cycles", 0)
+        print(f"  Circular dependencies: {n_cycles} cycles ({n_nodes} packages involved)")
+    else:
+        print(f"  Circular dependencies: none")
 
 
-def print_summary(combined: str) -> None:
+def _print_summary(combined: str) -> None:
     """Print the compressed summary to stdout, handling encoding.
 
     On consoles with non-UTF-8 encoding (e.g. cp949 on Windows), characters
@@ -119,6 +128,29 @@ def _write_facade_leaks(
         print(f"  [OK] facade_leaks.txt")
 
 
+def _write_cycles(
+    output_dir: Path,
+    cycles: dict[str, Any] | None,
+    package_names: set[str],
+    verbose: bool = False,
+) -> None:
+    """Write ``cycles.md`` — always produced."""
+    if cycles and cycles.get("total_cycles", 0) > 0:
+        text = format_cycles_text(cycles, package_names)
+        mermaid = format_cycles_mermaid(cycles, package_names)
+        content = (
+            f"# Circular Dependencies\n\n"
+            f"## Cycle Diagram\n\n"
+            f"```mermaid\n{mermaid}\n```\n\n"
+            f"## Details\n\n{text}\n"
+        )
+    else:
+        content = "No circular dependencies detected.\n"
+    (output_dir / "cycles.md").write_text(content, encoding="utf-8")
+    if verbose:
+        print(f"  [OK] cycles.md")
+
+
 def _write_json(
     output_dir: Path,
     full_data: dict[str, Any],
@@ -155,6 +187,7 @@ def _write_text_files(
     package_names: set[str],
     verbose: bool = False,
     facade_leaks: dict[str, Any] | None = None,
+    cycles: dict[str, Any] | None = None,
     top_coupling: int | None = None,
 ) -> None:
     """Write all text-format output files and optionally print summary to stdout."""
@@ -168,9 +201,13 @@ def _write_text_files(
     leaks_text = ""
     if facade_leaks and facade_leaks.get("total_leaks", 0) > 0:
         leaks_text = format_facade_leaks_text(facade_leaks, package_names)
+    cycles_text = ""
+    if cycles and cycles.get("total_cycles", 0) > 0:
+        cycles_text = format_cycles_text(cycles, package_names)
 
     n_coupling = sum(len(b["calls"]) for b in coupling["boundaries"])
     n_facade_leaks = facade_leaks.get("total_leaks", 0) if facade_leaks else 0
+    n_cycles = cycles.get("total_cycles", 0) if cycles else 0
 
     # Combined compressed summary
     sections = [
@@ -188,6 +225,9 @@ def _write_text_files(
     if leaks_text:
         sections.append("")
         sections.append(leaks_text)
+    if cycles_text:
+        sections.append("")
+        sections.append(cycles_text)
     sections.append("")
     sections.append(
         f"---\nModules: {metadata['parsed_modules']}"
@@ -195,6 +235,7 @@ def _write_text_files(
         f" | Entry points: {len(ep_map)}"
         f" | Cross-boundary calls: {n_coupling}"
         f" | Facade leaks: {n_facade_leaks}"
+        f" | Cycles: {n_cycles}"
     )
     combined = "\n\n".join(sections)
 
@@ -230,7 +271,7 @@ def _write_text_files(
         print("\n" + "=" * 50)
         print("COMPRESSED SUMMARY (~450 tokens)")
         print("=" * 50)
-        print_summary(combined)
+        _print_summary(combined)
 
 
 def write_outputs(
@@ -245,6 +286,7 @@ def write_outputs(
     package_names: set[str],
     verbose: bool = False,
     facade_leaks: dict[str, Any] | None = None,
+    cycles: dict[str, Any] | None = None,
     top_coupling: int | None = None,
 ) -> None:
     """Write all output files based on requested formats.
@@ -266,6 +308,8 @@ def write_outputs(
         Set of top-level package names for display shortening.
     verbose:
         If True, print progress and file-write confirmations to stdout.
+    cycles:
+        Cycle detection results from ``detect_cycles()``.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     if verbose:
@@ -273,6 +317,8 @@ def write_outputs(
 
     # facade_leaks.txt is always written (default output)
     _write_facade_leaks(output_dir, facade_leaks, package_names, verbose=verbose)
+    # cycles.md is always written (default output)
+    _write_cycles(output_dir, cycles, package_names, verbose=verbose)
 
     full_data = _build_full_data(dep_graph, class_hier, ep_map, coupling, metadata)
 
@@ -294,6 +340,7 @@ def write_outputs(
             package_names,
             verbose=verbose,
             facade_leaks=facade_leaks,
+            cycles=cycles,
             top_coupling=top_coupling,
         )
 

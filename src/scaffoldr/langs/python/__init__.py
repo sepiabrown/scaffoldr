@@ -4,9 +4,9 @@ import sys
 import tomllib
 from pathlib import Path
 
-from scaffoldr.core.types import AnalysisResult
-from .discovery import discover_workspace, discover_modules
-from .parsing import parse_file, analyze_module
+from scaffoldr.core import AnalysisResult
+from .discovery import _discover_workspace, _discover_modules
+from .parsing import _parse_file, _analyze_module
 
 __all__ = ["analyze"]
 
@@ -23,7 +23,7 @@ def analyze(workspace_root: Path) -> AnalysisResult:
     workspace_name = ws_config.get("project", {}).get("name", "") or workspace_root.name
 
     # Discover
-    packages, entry_points = discover_workspace(workspace_root)
+    packages, entry_points = _discover_workspace(workspace_root)
     if not packages:
         print(
             f"Error: No packages found in '{workspace_root}'.\n"
@@ -42,17 +42,22 @@ def analyze(workspace_root: Path) -> AnalysisResult:
         sys.exit(1)
 
     project_packages = set(packages.keys())
-    modules = discover_modules(workspace_root, packages)
+    modules = _discover_modules(workspace_root, packages)
 
     # Parse
     all_trees = {}
     all_analysis = {}
     parse_errors = 0
     for mod_name, filepath in sorted(modules.items()):
-        tree = parse_file(filepath)
+        tree = _parse_file(filepath)
         if tree:
             all_trees[mod_name] = tree
-            all_analysis[mod_name] = analyze_module(mod_name, tree, project_packages)
+            all_analysis[mod_name] = _analyze_module(
+                mod_name,
+                tree,
+                project_packages,
+                is_package=filepath.name == "__init__.py",
+            )
         else:
             parse_errors += 1
 

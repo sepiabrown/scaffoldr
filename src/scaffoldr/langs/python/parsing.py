@@ -6,21 +6,34 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
-    "ImportCollector",
-    "ClassCollector",
-    "FunctionCollector",
-    "parse_file",
-    "analyze_module",
+    "_ImportCollector",
+    "_ClassCollector",
+    "_FunctionCollector",
+    "_parse_file",
+    "_analyze_module",
 ]
 
 
-class ImportCollector(ast.NodeVisitor):
-    """Collects import statements from a module."""
+class _ImportCollector(ast.NodeVisitor):
+    """Collects ALL import statements from a module.
 
-    def __init__(self, module_name: str, project_packages: set[str]):
+    Collects every ``import`` and ``from … import`` regardless of where it
+    appears (module scope, function body, class body).  A dependency is a
+    dependency — lazy imports hide the cycle from the import machinery but
+    the structural coupling remains.
+    """
+
+    def __init__(
+        self,
+        module_name: str,
+        project_packages: set[str],
+        *,
+        is_package: bool = False,
+    ):
         self.module_name = module_name
         self.project_packages = project_packages
         self.imports: set[str] = set()
+        self.is_package = is_package
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -37,6 +50,15 @@ class ImportCollector(ast.NodeVisitor):
             # Handle relative imports
             if node.level and node.level > 0:
                 parts = self.module_name.split(".")
+                # For __init__.py (package modules), ``from .X`` means a
+                # sibling within the same package.  The module name already
+                # IS the package (``pkg.sub``), so level-1 should resolve
+                # relative to the package itself, not its parent.  We
+                # compensate by treating the module as if it had an extra
+                # ``__init__`` component so that level-1 peels back to the
+                # package rather than the grandparent.
+                if self.is_package:
+                    parts = parts + ["__init__"]
                 if node.level <= len(parts):
                     base = ".".join(parts[: len(parts) - node.level])
                     if node.module:
@@ -47,7 +69,7 @@ class ImportCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-class ClassCollector(ast.NodeVisitor):
+class _ClassCollector(ast.NodeVisitor):
     """Collects class definitions and their bases."""
 
     def __init__(self):
@@ -79,7 +101,7 @@ class ClassCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-class FunctionCollector(ast.NodeVisitor):
+class _FunctionCollector(ast.NodeVisitor):
     """Collects top-level function definitions."""
 
     def __init__(self):
@@ -108,7 +130,7 @@ class FunctionCollector(ast.NodeVisitor):
         )
 
 
-def parse_file(filepath: Path) -> ast.Module | None:
+def _parse_file(filepath: Path) -> ast.Module | None:
     """Parse a Python file, returning AST or None on failure."""
     try:
         source = filepath.read_text(encoding="utf-8", errors="replace")
@@ -118,20 +140,24 @@ def parse_file(filepath: Path) -> ast.Module | None:
         return None
 
 
-def analyze_module(
-    mod_name: str, tree: ast.Module, project_packages: set[str]
+def _analyze_module(
+    mod_name: str,
+    tree: ast.Module,
+    project_packages: set[str],
+    *,
+    is_package: bool = False,
 ) -> dict[str, Any]:
     """Analyze a single module's AST."""
     # Imports
-    imp = ImportCollector(mod_name, project_packages)
+    imp = _ImportCollector(mod_name, project_packages, is_package=is_package)
     imp.visit(tree)
 
     # Classes
-    cls = ClassCollector()
+    cls = _ClassCollector()
     cls.visit(tree)
 
     # Top-level functions
-    fn = FunctionCollector()
+    fn = _FunctionCollector()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             fn.visit(node)

@@ -12,6 +12,8 @@ __all__ = [
     "format_entry_points_text",
     "format_coupling_density_text",
     "format_facade_leaks_text",
+    "format_cycles_text",
+    "format_cycles_mermaid",
     "format_toon",
 ]
 
@@ -344,5 +346,127 @@ def format_facade_leaks_text(
             if available:
                 lines.append(f"    already in facade: {', '.join(available)}")
         lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_cycles_text(cycles_data: dict[str, Any], package_names: set[str]) -> str:
+    """Format cycle detection results as human-readable text."""
+    cycles = cycles_data.get("cycles", [])
+    if not cycles:
+        return "No circular dependencies detected."
+
+    total = cycles_data.get("total_cycles", len(cycles))
+    lines = [
+        f"# Circular Dependencies \u2014 {total} cycle{'s' if total != 1 else ''} detected",
+        "",
+    ]
+
+    for i, cycle in enumerate(cycles, 1):
+        nodes = cycle["nodes"]
+        edges = cycle["edges"]
+        lines.append(f"## Cycle {i} ({len(nodes)} packages)")
+
+        # Build cycle chain: follow edges to create a readable path
+        chain = _build_cycle_chain(nodes, edges, package_names)
+        lines.append(f"  {chain}")
+        lines.append("")
+
+        lines.append("  Edges:")
+        for edge in edges:
+            src = shorten_module(edge["from"], package_names, keep_root=True)
+            dst = shorten_module(edge["to"], package_names, keep_root=True)
+            lines.append(f"    {src} \u2192 {dst}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_cycle_chain(
+    nodes: list[str], edges: list[dict[str, str]], package_names: set[str]
+) -> str:
+    """Build a readable cycle chain string from nodes and edges.
+
+    Attempts to trace a path through the cycle starting from the first node.
+    Falls back to listing nodes alphabetically if no complete chain is found.
+    """
+    if not nodes:
+        return ""
+
+    # Build adjacency for this cycle
+    adj: dict[str, list[str]] = {}
+    for edge in edges:
+        adj.setdefault(edge["from"], []).append(edge["to"])
+
+    # Try to find a Hamiltonian path (visit each node once, then return)
+    start = nodes[0]
+    visited: set[str] = {start}
+    path = [start]
+
+    current = start
+    while len(path) < len(nodes):
+        found_next = False
+        for neighbor in sorted(adj.get(current, [])):
+            if neighbor not in visited:
+                visited.add(neighbor)
+                path.append(neighbor)
+                current = neighbor
+                found_next = True
+                break
+        if not found_next:
+            break
+
+    # Close the cycle back to start
+    path.append(start)
+
+    short = [shorten_module(n, package_names, keep_root=True) for n in path]
+    return " \u2192 ".join(short)
+
+
+def format_cycles_mermaid(
+    cycles_data: dict[str, Any], package_names: set[str]
+) -> str:
+    """Format cycles as Mermaid diagram highlighting cycle edges.
+
+    Cycle edges use ``==>`` (thick arrow) and cycle nodes are styled red.
+    Only the cycle subgraphs are shown.
+    """
+    cycles = cycles_data.get("cycles", [])
+    if not cycles:
+        return "graph LR\n    no_cycles[No circular dependencies detected]"
+
+    lines = ["graph LR"]
+
+    # Collect all cycle nodes and edges across all cycles
+    all_cycle_nodes: set[str] = set()
+    node_id_map: dict[str, str] = {}
+
+    for i, cycle in enumerate(cycles, 1):
+        nodes = cycle["nodes"]
+        edges = cycle["edges"]
+
+        # Subgraph per cycle
+        lines.append(f"    subgraph cycle{i}[\"Cycle {i}\"]")
+
+        for node in nodes:
+            all_cycle_nodes.add(node)
+            nid = node.replace(".", "_")
+            node_id_map[node] = nid
+            short = shorten_module(node, package_names, keep_root=True)
+            lines.append(f"        {nid}[{short}]")
+
+        for edge in edges:
+            src_id = node_id_map[edge["from"]]
+            dst_id = node_id_map[edge["to"]]
+            lines.append(f"        {src_id} ==> {dst_id}")
+
+        lines.append("    end")
+
+    # Style cycle nodes red
+    if all_cycle_nodes:
+        styled_ids = ",".join(
+            node_id_map[n] for n in sorted(all_cycle_nodes)
+        )
+        lines.append(f"    style {styled_ids} fill:#f66,stroke:#900,color:#fff")
 
     return "\n".join(lines)

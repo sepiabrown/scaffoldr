@@ -1,8 +1,15 @@
 """Language detection and dispatch."""
 
-from pathlib import Path
+from __future__ import annotations
 
-__all__ = ["detect_language"]
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from ..core.types import AnalysisResult
+
+__all__ = ["detect_language", "get_analyzer"]
 
 
 def detect_language(workspace_root: Path) -> str:
@@ -18,8 +25,6 @@ def detect_language(workspace_root: Path) -> str:
         return "python"
     # Future: (workspace_root / "package.json").exists() -> "typescript"
     # Future: (workspace_root / "Cargo.toml").exists() -> "rust"
-
-    import sys
 
     markers = [
         "pyproject.toml",
@@ -41,4 +46,19 @@ def detect_language(workspace_root: Path) -> str:
         f"Example: scaffoldr analyze ~/my-project/workspaces",
         file=sys.stderr,
     )
+    sys.exit(1)
+
+
+def get_analyzer(lang: str) -> Callable[[Path], AnalysisResult]:
+    """Return the analyzer function for a given language.
+
+    Raises:
+        SystemExit: If the language is not supported.
+    """
+    if lang == "python":
+        from .python import analyze
+
+        return analyze
+
+    print(f"Unsupported language: {lang}", file=sys.stderr)
     sys.exit(1)
