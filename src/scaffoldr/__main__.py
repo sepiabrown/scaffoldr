@@ -16,6 +16,8 @@ from .core import (
     generate_entry_point_map,
     generate_coupling_density,
     generate_facade_leaks,
+    generate_test_boundary_analysis,
+    generate_init_hygiene,
     build_facade_exports,
     detect_cycles,
 )
@@ -54,6 +56,7 @@ def _analyze(cmd: AnalyzeCommand) -> None:
 
     facade_exports = build_facade_exports(result["all_analysis"], result["all_trees"])
     facade_set = set(facade_exports.keys())
+    test_modules = result["test_modules"]
 
     # Generate graph artifacts
     dep_graph = generate_dependency_graph(
@@ -70,13 +73,21 @@ def _analyze(cmd: AnalyzeCommand) -> None:
         result["all_analysis"], result["all_trees"], facade_set=facade_set
     )
     facade_leaks = generate_facade_leaks(
-        result["all_analysis"], result["all_trees"], facade_exports
+        result["all_analysis"], result["all_trees"], facade_exports,
+        test_modules=test_modules,
     )
+    test_boundary = generate_test_boundary_analysis(
+        result["all_analysis"], result["all_trees"], facade_exports, test_modules
+    )
+    init_hygiene = generate_init_hygiene(result["all_analysis"], result["all_trees"])
     cycles = detect_cycles(dep_graph)
 
     # Progress: artifact generation
     if verbose:
-        print_graph_progress(dep_graph, class_hier, ep_map, coupling, facade_leaks, cycles=cycles)
+        print_graph_progress(
+            dep_graph, class_hier, ep_map, coupling, facade_leaks,
+            cycles=cycles, init_hygiene=init_hygiene, test_boundary=test_boundary,
+        )
 
     # Write outputs
     metadata = {
@@ -95,6 +106,8 @@ def _analyze(cmd: AnalyzeCommand) -> None:
         coupling=coupling,
         facade_leaks=facade_leaks,
         cycles=cycles,
+        init_hygiene=init_hygiene,
+        test_boundary=test_boundary,
         metadata=metadata,
         package_names=package_names,
         verbose=verbose,

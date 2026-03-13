@@ -12,8 +12,10 @@ __all__ = [
     "format_entry_points_text",
     "format_coupling_density_text",
     "format_facade_leaks_text",
+    "format_test_boundary_text",
     "format_cycles_text",
     "format_cycles_mermaid",
+    "format_init_hygiene_text",
     "format_toon",
 ]
 
@@ -350,6 +352,86 @@ def format_facade_leaks_text(
     return "\n".join(lines)
 
 
+def format_test_boundary_text(
+    test_boundary: dict[str, Any], package_names: set[str]
+) -> str:
+    """Format test boundary analysis as human-readable text.
+
+    Shows boundary violations (tests reaching past facades) and facade
+    coverage (which facade exports are exercised by tests).
+    """
+    violations = test_boundary.get("boundary_violations", [])
+    facade_coverage = test_boundary.get("facade_coverage", [])
+    total_violations = test_boundary.get("total_violations", 0)
+    total_facades = test_boundary.get("total_facades", 0)
+    avg_pct = test_boundary.get("average_coverage_pct", 0.0)
+
+    lines = [
+        "",
+        "=" * 60,
+        f"TEST BOUNDARY \u2014 {total_violations} violations, {total_facades} facades, {avg_pct}% average coverage",
+        "=" * 60,
+        "",
+    ]
+
+    # -- Boundary violations ------------------------------------------------
+    if violations:
+        lines.append("## Boundary Violations (tests reaching past facades)")
+        # Group by test module
+        by_test: dict[str, list[dict[str, Any]]] = {}
+        for v in violations:
+            by_test.setdefault(v["test_module"], []).append(v)
+
+        for test_mod, test_violations in sorted(by_test.items()):
+            short_test = shorten_module(test_mod, package_names)
+            lines.append(f"  {short_test}")
+            for v in test_violations:
+                imported_from = shorten_module(v["imported_from"], package_names)
+                facade = shorten_module(v["facade"], package_names)
+                names_str = ", ".join(v["names"])
+                lines.append(f"    from {imported_from} import {names_str}")
+                lines.append(f"    should test via facade: from {facade} import ...")
+                missing = v.get("missing_from_facade", [])
+                available = v.get("available_in_facade", [])
+                if missing:
+                    lines.append(
+                        f"    internal-only names (eradicate test): {', '.join(missing)}"
+                    )
+                if available:
+                    lines.append(
+                        f"    path-only violations (fix import path): {', '.join(available)}"
+                    )
+        lines.append("")
+    else:
+        lines.append("## Boundary Violations")
+        lines.append("  No violations detected.")
+        lines.append("")
+
+    # -- Facade coverage ----------------------------------------------------
+    if facade_coverage:
+        lines.append("## Facade Coverage")
+        for fc in facade_coverage:
+            facade = shorten_module(fc["facade"], package_names)
+            total_exports = fc["total_exports"]
+            covered = fc["covered"]
+            uncovered = fc["uncovered"]
+            pct = fc["coverage_pct"]
+            lines.append(
+                f"  {facade} ({len(covered)}/{total_exports} exports covered, {pct}%)"
+            )
+            if covered:
+                lines.append(f"    covered: {', '.join(covered)}")
+            if uncovered:
+                lines.append(f"    uncovered: {', '.join(uncovered)}")
+        lines.append("")
+    else:
+        lines.append("## Facade Coverage")
+        lines.append("  No facades found.")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def format_cycles_text(cycles_data: dict[str, Any], package_names: set[str]) -> str:
     """Format cycle detection results as human-readable text."""
     cycles = cycles_data.get("cycles", [])
@@ -468,5 +550,55 @@ def format_cycles_mermaid(
             node_id_map[n] for n in sorted(all_cycle_nodes)
         )
         lines.append(f"    style {styled_ids} fill:#f66,stroke:#900,color:#fff")
+
+    return "\n".join(lines)
+
+
+_SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
+
+
+def format_init_hygiene_text(
+    hygiene: dict[str, Any], package_names: set[str]
+) -> str:
+    """Format __init__.py hygiene check results as text.
+
+    Shows issues grouped by module, sorted by severity within each group,
+    using the same banner style as ``format_facade_leaks_text``.
+    """
+    issues = hygiene.get("issues", [])
+    if not issues:
+        return ""
+
+    total_issues = hygiene.get("total_issues", len(issues))
+    packages_checked = hygiene.get("packages_checked", 0)
+    clean_packages = hygiene.get("clean_packages", 0)
+
+    lines = [
+        "",
+        "=" * 60,
+        f"INIT HYGIENE — {total_issues} issues in {packages_checked} packages ({clean_packages} clean)",
+        "=" * 60,
+        "",
+    ]
+
+    # Group issues by module
+    by_module: dict[str, list[dict[str, Any]]] = {}
+    for issue in issues:
+        by_module.setdefault(issue["module"], []).append(issue)
+
+    for module, mod_issues in sorted(by_module.items()):
+        short = shorten_module(module, package_names)
+        lines.append(f"## {short} ({len(mod_issues)} issues)")
+
+        # Sort by severity: error > warning > info
+        mod_issues.sort(key=lambda i: _SEVERITY_ORDER.get(i["severity"], 9))
+
+        for issue in mod_issues:
+            sev = issue["severity"].upper()
+            check = issue["check"]
+            msg = issue["message"]
+            line_suffix = f":{issue['line']}" if issue.get("line") is not None else ""
+            lines.append(f"  [{sev}] {check}: {msg}{line_suffix}")
+        lines.append("")
 
     return "\n".join(lines)

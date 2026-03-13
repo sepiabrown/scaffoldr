@@ -61,6 +61,19 @@ def analyze(workspace_root: Path) -> AnalysisResult:
         else:
             parse_errors += 1
 
+    # Partition modules into source and test modules.
+    # A module is a test module if its file path (relative to workspace root)
+    # contains a "tests/" or "test/" directory segment.
+    test_modules: set[str] = set()
+    for mod_name, filepath in modules.items():
+        try:
+            rel = filepath.relative_to(workspace_root)
+        except ValueError:
+            rel = filepath
+        # Check if any path component is "tests" or "test"
+        if "tests" in rel.parts or "test" in rel.parts:
+            test_modules.add(mod_name)
+
     return AnalysisResult(
         workspace_name=workspace_name,
         packages=packages,
@@ -69,4 +82,5 @@ def analyze(workspace_root: Path) -> AnalysisResult:
         all_analysis=all_analysis,
         all_trees=all_trees,
         parse_errors=parse_errors,
+        test_modules=test_modules,
     )

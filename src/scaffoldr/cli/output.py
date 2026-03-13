@@ -21,6 +21,8 @@ from ..core import (
     format_dependency_text,
     format_entry_points_text,
     format_facade_leaks_text,
+    format_test_boundary_text,
+    format_init_hygiene_text,
     format_toon,
 )
 
@@ -55,6 +57,8 @@ def print_graph_progress(
     coupling: dict[str, Any],
     facade_leaks: dict[str, Any] | None = None,
     cycles: dict[str, Any] | None = None,
+    init_hygiene: dict[str, Any] | None = None,
+    test_boundary: dict[str, Any] | None = None,
 ) -> None:
     """Print ``[3/4]`` artifact generation progress."""
     n_pkg_edges = len(dep_graph["package_level"])
@@ -80,6 +84,16 @@ def print_graph_progress(
         print(f"  Circular dependencies: {n_cycles} cycles ({n_nodes} packages involved)")
     else:
         print(f"  Circular dependencies: none")
+    if init_hygiene is not None:
+        n_issues = init_hygiene.get("total_issues", 0)
+        n_packages = init_hygiene.get("packages_checked", 0)
+        n_clean = init_hygiene.get("clean_packages", 0)
+        print(f"  Init hygiene: {n_issues} issues in {n_packages} packages ({n_clean} clean)")
+    if test_boundary is not None:
+        n_violations = test_boundary.get("total_violations", 0)
+        n_facades = test_boundary.get("total_facades", 0)
+        avg_cov = test_boundary.get("average_coverage_pct", 0.0)
+        print(f"  Test boundary: {n_violations} violations, {n_facades} facades, {avg_cov}% avg coverage")
 
 
 def _print_summary(combined: str) -> None:
@@ -149,6 +163,41 @@ def _write_cycles(
     (output_dir / "cycles.md").write_text(content, encoding="utf-8")
     if verbose:
         print(f"  [OK] cycles.md")
+
+
+def _write_init_hygiene(
+    output_dir: Path,
+    init_hygiene: dict[str, Any] | None,
+    package_names: set[str],
+    verbose: bool = False,
+) -> None:
+    """Write ``init_hygiene.txt`` — always produced."""
+    if init_hygiene and init_hygiene.get("total_issues", 0) > 0:
+        content = format_init_hygiene_text(init_hygiene, package_names)
+    else:
+        content = "All __init__.py files are clean.\n"
+    (output_dir / "init_hygiene.txt").write_text(content, encoding="utf-8")
+    if verbose:
+        print(f"  [OK] init_hygiene.txt")
+
+
+def _write_test_boundary(
+    output_dir: Path,
+    test_boundary: dict[str, Any] | None,
+    package_names: set[str],
+    verbose: bool = False,
+) -> None:
+    """Write ``test_boundary.txt`` — always produced."""
+    if test_boundary and (
+        test_boundary.get("total_violations", 0) > 0
+        or test_boundary.get("total_facades", 0) > 0
+    ):
+        content = format_test_boundary_text(test_boundary, package_names)
+    else:
+        content = "No test boundary data. No test modules or facades found.\n"
+    (output_dir / "test_boundary.txt").write_text(content, encoding="utf-8")
+    if verbose:
+        print(f"  [OK] test_boundary.txt")
 
 
 def _write_json(
@@ -287,6 +336,8 @@ def write_outputs(
     verbose: bool = False,
     facade_leaks: dict[str, Any] | None = None,
     cycles: dict[str, Any] | None = None,
+    init_hygiene: dict[str, Any] | None = None,
+    test_boundary: dict[str, Any] | None = None,
     top_coupling: int | None = None,
 ) -> None:
     """Write all output files based on requested formats.
@@ -310,6 +361,8 @@ def write_outputs(
         If True, print progress and file-write confirmations to stdout.
     cycles:
         Cycle detection results from ``detect_cycles()``.
+    test_boundary:
+        Test boundary analysis from ``generate_test_boundary_analysis()``.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     if verbose:
@@ -319,6 +372,10 @@ def write_outputs(
     _write_facade_leaks(output_dir, facade_leaks, package_names, verbose=verbose)
     # cycles.md is always written (default output)
     _write_cycles(output_dir, cycles, package_names, verbose=verbose)
+    # init_hygiene.txt is always written (default output)
+    _write_init_hygiene(output_dir, init_hygiene, package_names, verbose=verbose)
+    # test_boundary.txt is always written (default output)
+    _write_test_boundary(output_dir, test_boundary, package_names, verbose=verbose)
 
     full_data = _build_full_data(dep_graph, class_hier, ep_map, coupling, metadata)
 

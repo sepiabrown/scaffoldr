@@ -19,3 +19,4 @@ class AnalysisResult(TypedDict):
     all_analysis: dict[str, ModuleAnalysis]
     all_trees: dict[str, Any]
     parse_errors: int
+    test_modules: set[str]

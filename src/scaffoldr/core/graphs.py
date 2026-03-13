@@ -11,8 +11,10 @@ __all__ = [
     "generate_entry_point_map",
     "generate_coupling_density",
     "generate_facade_leaks",
+    "generate_test_boundary_analysis",
     "build_facade_exports",
     "detect_cycles",
+    "generate_init_hygiene",
     "CallCollector",
     "find_function_calls",
 ]
@@ -296,6 +298,7 @@ def build_facade_exports(
         all_names: set[str] = set()
         has_all = False
         for node in ast.iter_child_nodes(tree):
+            # ``__all__ = [...]`` (plain assignment)
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name) and target.id == "__all__":
@@ -306,10 +309,23 @@ def build_facade_exports(
                                     elt.value, str
                                 ):
                                     all_names.add(elt.value)
+            # ``__all__: list[str] = [...]`` (annotated assignment)
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                    has_all = True
+                    if node.value is not None and isinstance(node.value, (ast.List, ast.Tuple)):
+                        for elt in node.value.elts:
+                            if isinstance(elt, ast.Constant) and isinstance(
+                                elt.value, str
+                            ):
+                                all_names.add(elt.value)
 
         if has_all:
-            # __all__ is the authoritative facade — nothing else matters
-            facade_exports[mod_name] = all_names
+            # __all__ is the authoritative facade — nothing else matters.
+            # An empty __all__ explicitly declares "no public exports" — this
+            # is a namespace-only package, not a facade boundary.
+            if all_names:
+                facade_exports[mod_name] = all_names
             continue
 
         # 2. No __all__ — fall back to all imported + defined names
@@ -331,7 +347,11 @@ def build_facade_exports(
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 exports.add(node.name)
 
-        facade_exports[mod_name] = exports
+        # Only register as a facade if there are actual exports
+        # (an __init__.py with only a docstring is just a namespace marker,
+        # not a facade boundary)
+        if exports:
+            facade_exports[mod_name] = exports
 
     return facade_exports
 
@@ -340,12 +360,17 @@ def generate_facade_leaks(
     all_analysis: dict[str, dict[str, Any]],
     all_trees: dict[str, ast.Module],
     facade_exports: dict[str, set[str]],
+    test_modules: set[str] | None = None,
 ) -> dict[str, Any]:
     """Detect facade bypasses at any depth (unified leak detection).
 
     Scans import statements (not calls) to find modules that import from a
     package's internals instead of through its __init__.py facade.  Covers
     both inter-package and intra-package leaks in a single pass.
+
+    When *test_modules* is provided, modules whose name is in the set are
+    skipped — test-file leaks are reported separately by
+    ``generate_test_boundary_analysis()``.
 
     Example leak:
         myapp.dataset.dataset imports from myapp.dataset.pipeline.stages
@@ -361,6 +386,9 @@ def generate_facade_leaks(
     leaks: list[dict[str, Any]] = []
 
     for mod_name in sorted(all_mod_names):
+        # Skip test modules — their leaks are handled by test boundary analysis
+        if test_modules and mod_name in test_modules:
+            continue
         tree = all_trees.get(mod_name)
         if tree is None:
             continue
@@ -456,6 +484,183 @@ def generate_facade_leaks(
             )
 
     return {"leaks": leaks, "total_leaks": len(leaks)}
+
+
+def generate_test_boundary_analysis(
+    all_analysis: dict[str, dict[str, Any]],
+    all_trees: dict[str, ast.Module],
+    facade_exports: dict[str, set[str]],
+    test_modules: set[str],
+) -> dict[str, Any]:
+    """Analyse test files for facade boundary violations and facade coverage.
+
+    Two outputs:
+
+    1. **Boundary violations** — test modules that import from a package's
+       internal modules instead of through its ``__init__.py`` facade.
+       Sub-classified as:
+       - *path violation*: the imported name IS in ``__all__`` but the import
+         path bypasses the facade (less severe — fix the import path).
+       - *internal test*: the imported name is NOT in ``__all__`` (the test
+         exercises an internal that the facade does not expose).
+
+    2. **Facade coverage** — for each facade with ``__all__``, which exports
+       are imported by at least one test module (directly through the facade).
+
+    Returns a dict matching the documented output schema.
+    """
+    all_mod_names = set(all_analysis.keys())
+
+    # ---- Part 1: boundary violations ------------------------------------
+    violations: list[dict[str, Any]] = []
+
+    for mod_name in sorted(test_modules):
+        tree = all_trees.get(mod_name)
+        if tree is None:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+
+            # Resolve the import target module
+            src_mod = node.module or ""
+            level = node.level or 0
+            if level > 0:
+                parts = mod_name.split(".")
+                if level <= len(parts):
+                    base = ".".join(parts[: len(parts) - level])
+                    src_mod = f"{base}.{src_mod}" if src_mod else base
+            if not src_mod:
+                continue
+
+            # Resolve src_mod to a known module (best-match)
+            resolved = src_mod
+            while resolved and resolved not in all_mod_names:
+                resolved = ".".join(resolved.split(".")[:-1])
+            if not resolved:
+                continue
+
+            # Find the common parent between test module and target
+            imp_parts = mod_name.split(".")
+            tgt_parts = resolved.split(".")
+
+            common_len = 0
+            for i in range(min(len(imp_parts), len(tgt_parts))):
+                if imp_parts[i] == tgt_parts[i]:
+                    common_len = i + 1
+                else:
+                    break
+
+            if common_len == 0:
+                continue
+
+            if len(tgt_parts) <= common_len:
+                continue  # Target IS the common parent — not a sub-package import
+
+            sibling_pkg = ".".join(tgt_parts[: common_len + 1])
+
+            # Skip if the test IS inside the sibling package
+            if mod_name == sibling_pkg or mod_name.startswith(sibling_pkg + "."):
+                continue
+
+            # Skip if importing directly from the sibling facade
+            if resolved == sibling_pkg:
+                continue
+
+            # Target is an internal module of sibling_pkg — check facade
+            if sibling_pkg not in facade_exports:
+                continue
+
+            facade_names = facade_exports[sibling_pkg]
+            imported_names = []
+            available: list[str] = []
+            missing: list[str] = []
+            for alias in node.names or []:
+                name = alias.name
+                imported_names.append(name)
+                if name in facade_names:
+                    available.append(name)
+                else:
+                    missing.append(name)
+
+            if not imported_names:
+                continue
+
+            violations.append(
+                {
+                    "test_module": mod_name,
+                    "imported_from": resolved,
+                    "facade": sibling_pkg,
+                    "names": imported_names,
+                    "available_in_facade": available,
+                    "missing_from_facade": missing,
+                }
+            )
+
+    # ---- Part 2: facade coverage -----------------------------------------
+    # For each facade, check which __all__ exports are imported by test modules
+    # via "from <facade> import X" statements.
+    facade_coverage: list[dict[str, Any]] = []
+
+    for facade_mod, exports in sorted(facade_exports.items()):
+        if not exports:
+            continue
+
+        # Collect names that tests import from this facade
+        covered_names: set[str] = set()
+        for test_mod in sorted(test_modules):
+            tree = all_trees.get(test_mod)
+            if tree is None:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                # Resolve module path
+                src_mod = node.module or ""
+                level = node.level or 0
+                if level > 0:
+                    parts = test_mod.split(".")
+                    if level <= len(parts):
+                        base = ".".join(parts[: len(parts) - level])
+                        src_mod = f"{base}.{src_mod}" if src_mod else base
+                if src_mod != facade_mod:
+                    continue
+                # This test imports from the facade directly
+                for alias in node.names or []:
+                    name = alias.name
+                    if name in exports:
+                        covered_names.add(name)
+
+        covered = sorted(covered_names)
+        uncovered = sorted(exports - covered_names)
+        total = len(exports)
+        pct = (len(covered) / total * 100.0) if total > 0 else 0.0
+
+        facade_coverage.append(
+            {
+                "facade": facade_mod,
+                "total_exports": total,
+                "covered": covered,
+                "uncovered": uncovered,
+                "coverage_pct": round(pct, 1),
+            }
+        )
+
+    total_facades = len(facade_coverage)
+    avg_pct = (
+        sum(fc["coverage_pct"] for fc in facade_coverage) / total_facades
+        if total_facades > 0
+        else 0.0
+    )
+
+    return {
+        "boundary_violations": violations,
+        "facade_coverage": facade_coverage,
+        "total_violations": len(violations),
+        "total_facades": total_facades,
+        "average_coverage_pct": round(avg_pct, 1),
+    }
 
 
 def generate_coupling_density(
@@ -806,3 +1011,378 @@ def detect_cycles(dep_graph: dict[str, Any]) -> dict[str, Any]:
         "total_cycles": len(cycles),
         "total_nodes_in_cycles": total_nodes,
     }
+
+
+# Stdlib modules commonly used as infrastructure in __init__.py files.
+# ``import importlib`` (or ``import importlib as _importlib``) is lazy-loading
+# plumbing, not a structural coupling issue.  Suppress NON_FROM_IMPORT for these.
+_STDLIB_INFRA_MODULES = frozenset({
+    "importlib", "sys", "types", "os", "warnings", "functools",
+    "typing", "collections", "abc", "enum", "pathlib",
+})
+
+# Imports that are language features or stdlib utilities, not package exports.
+# Suppress ORPHAN_IMPORT for these when they appear as from-imports in __init__.py.
+_INFRA_IMPORT_NAMES = frozenset({
+    "annotations",   # from __future__ import annotations — language feature
+    "ModuleType",    # from types import ModuleType — lazy-loading utility
+    "TYPE_CHECKING", # from typing import TYPE_CHECKING — type-checking guard
+})
+
+
+def generate_init_hygiene(
+    all_analysis: dict[str, dict[str, Any]],
+    all_trees: dict[str, ast.Module],
+) -> dict[str, Any]:
+    """Check ``__init__.py`` files for hygiene violations.
+
+    Inspects every package ``__init__.py`` AST for structural rules:
+
+    - ``NO_ALL``: missing ``__all__``
+    - ``BARE_CODE``: statements beyond imports / ``__all__`` / ``__version__`` /
+      ``__getattr__`` / ``__dir__`` / docstrings / lazy-map dicts used by
+      ``__getattr__``
+    - ``PRIVATE_EXPORT``: ``__all__`` exports names starting with ``_``
+      (excluding dunder names like ``__version__``)
+    - ``ALL_MISMATCH``: name in ``__all__`` not importable (not from-imported,
+      not defined, not in a ``__getattr__`` lazy map, and not resolved by
+      ``__getattr__`` via ``if name == "X"`` / ``if name in __all__``)
+    - ``NON_FROM_IMPORT``: uses ``import X`` instead of ``from X import ...``
+      (suppressed for stdlib infrastructure modules like ``importlib``, ``sys``)
+    - ``ORPHAN_IMPORT``: ``from`` import not listed in ``__all__``
+      (suppressed for ``from __future__ import annotations`` and stdlib
+      type imports like ``ModuleType``)
+
+    Returns:
+        {"issues": [{"module": str, "check": str, "severity": str,
+                      "message": str, "line": int | None}],
+         "packages_checked": int,
+         "clean_packages": int,
+         "total_issues": int}
+    """
+    all_mod_names = set(all_analysis.keys())
+    issues: list[dict[str, Any]] = []
+    packages_checked = 0
+    clean_packages = 0
+
+    for mod_name in sorted(all_mod_names):
+        # Only package __init__.py files
+        prefix = mod_name + "."
+        has_children = any(m.startswith(prefix) for m in all_mod_names)
+        if not has_children:
+            continue
+
+        tree = all_trees.get(mod_name)
+        if tree is None:
+            continue
+
+        packages_checked += 1
+        mod_issues: list[dict[str, Any]] = []
+
+        # --- Extract __all__, __getattr__, from-imports, etc. from AST ---
+        has_all = False
+        all_names: set[str] = set()
+        all_line: int | None = None
+        has_getattr = False
+        getattr_dict_names: set[str] = set()  # dicts referenced in __getattr__
+        lazy_map_keys: set[str] = set()  # keys from those dicts
+        from_imported_names: set[str] = set()  # names brought in by `from ... import`
+        defined_names: set[str] = set()  # classes/functions defined in __init__
+        non_from_imports: list[tuple[str, int]] = []  # (module, line)
+        bare_code_lines: list[tuple[str, int]] = []  # (description, line)
+
+        # Track whether __getattr__ uses ``if name in __all__`` to resolve
+        # all names in __all__ lazily.
+        getattr_resolves_all: bool = False
+        # String literals from ``if name == "X"`` in __getattr__
+        getattr_literal_names: set[str] = set()
+
+        # First pass: identify __getattr__ and which dict names it references
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "__getattr__":
+                    has_getattr = True
+                    # Find dict names referenced via .get(name) or [name] patterns
+                    for sub in ast.walk(node):
+                        if isinstance(sub, ast.Call):
+                            func = sub.func
+                            if (
+                                isinstance(func, ast.Attribute)
+                                and func.attr == "get"
+                                and isinstance(func.value, ast.Name)
+                            ):
+                                getattr_dict_names.add(func.value.id)
+                        if isinstance(sub, ast.Subscript):
+                            if isinstance(sub.value, ast.Name):
+                                getattr_dict_names.add(sub.value.id)
+                        # ``if name in some_dict`` — membership test on a variable
+                        if isinstance(sub, ast.Compare):
+                            if (
+                                len(sub.ops) == 1
+                                and isinstance(sub.ops[0], ast.In)
+                                and len(sub.comparators) == 1
+                            ):
+                                comp = sub.comparators[0]
+                                if isinstance(comp, ast.Name):
+                                    if comp.id == "__all__":
+                                        # ``if name in __all__`` — all names in __all__ are resolved
+                                        getattr_resolves_all = True
+                                    else:
+                                        # ``if name in _ROUTE`` — treat as dict lookup
+                                        getattr_dict_names.add(comp.id)
+                        # ``if name == "literal"`` — direct string comparison
+                        if isinstance(sub, ast.Compare):
+                            if (
+                                len(sub.ops) == 1
+                                and isinstance(sub.ops[0], ast.Eq)
+                                and len(sub.comparators) == 1
+                            ):
+                                comp = sub.comparators[0]
+                                if isinstance(comp, ast.Constant) and isinstance(
+                                    comp.value, str
+                                ):
+                                    getattr_literal_names.add(comp.value)
+
+        # Second pass: collect all names from lazy-load dicts
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id in getattr_dict_names
+                        and isinstance(node.value, ast.Dict)
+                    ):
+                        for key in node.value.keys:
+                            if isinstance(key, ast.Constant) and isinstance(
+                                key.value, str
+                            ):
+                                lazy_map_keys.add(key.value)
+
+        # Third pass: full analysis
+        for node in ast.iter_child_nodes(tree):
+            # __all__ assignment (plain: ``__all__ = [...]``)
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "__all__":
+                        has_all = True
+                        all_line = node.lineno
+                        if isinstance(node.value, (ast.List, ast.Tuple)):
+                            for elt in node.value.elts:
+                                if isinstance(elt, ast.Constant) and isinstance(
+                                    elt.value, str
+                                ):
+                                    all_names.add(elt.value)
+
+            # __all__ annotated assignment (``__all__: list[str] = [...]``)
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                    has_all = True
+                    all_line = node.lineno
+                    if node.value is not None and isinstance(node.value, (ast.List, ast.Tuple)):
+                        for elt in node.value.elts:
+                            if isinstance(elt, ast.Constant) and isinstance(
+                                elt.value, str
+                            ):
+                                all_names.add(elt.value)
+
+            # from ... import ...
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names or []:
+                    local_name = alias.asname if alias.asname else alias.name
+                    from_imported_names.add(local_name)
+
+            # import X (non-from)
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local_name = alias.asname if alias.asname else alias.name
+                    non_from_imports.append((local_name, node.lineno))
+
+            # Class/function definitions
+            if isinstance(node, ast.ClassDef):
+                defined_names.add(node.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined_names.add(node.name)
+
+            # Top-level assignments (e.g., ``__version__ = "1.0"``)
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id != "__all__":
+                        defined_names.add(target.id)
+
+            # Bare code detection — check for statements that aren't allowed
+            if _is_bare_code(node, getattr_dict_names):
+                desc = _describe_node(node)
+                bare_code_lines.append((desc, node.lineno))
+
+        # --- Generate issues ---
+
+        # NO_ALL
+        if not has_all:
+            mod_issues.append({
+                "module": mod_name,
+                "check": "NO_ALL",
+                "severity": "error",
+                "message": "__init__.py has no __all__",
+                "line": None,
+            })
+
+        # BARE_CODE
+        for desc, line in bare_code_lines:
+            mod_issues.append({
+                "module": mod_name,
+                "check": "BARE_CODE",
+                "severity": "warning",
+                "message": f"bare code: {desc}",
+                "line": line,
+            })
+
+        # NON_FROM_IMPORT — suppress for stdlib modules (infrastructure, not coupling)
+        for imp_name, line in non_from_imports:
+            # Strip leading underscores (alias convention: ``import importlib as _importlib``)
+            bare_name = imp_name.lstrip("_")
+            if bare_name in _STDLIB_INFRA_MODULES:
+                continue
+            mod_issues.append({
+                "module": mod_name,
+                "check": "NON_FROM_IMPORT",
+                "severity": "warning",
+                "message": f"non-from import: import {imp_name}",
+                "line": line,
+            })
+
+        # PRIVATE_EXPORT
+        if has_all:
+            for name in sorted(all_names):
+                if name.startswith("_") and not (
+                    name.startswith("__") and name.endswith("__")
+                ):
+                    mod_issues.append({
+                        "module": mod_name,
+                        "check": "PRIVATE_EXPORT",
+                        "severity": "warning",
+                        "message": f"__all__ exports private name: {name}",
+                        "line": all_line,
+                    })
+
+        # ALL_MISMATCH — names in __all__ not found in any source
+        if has_all:
+            known_names = from_imported_names | defined_names | lazy_map_keys | getattr_literal_names
+            for name in sorted(all_names):
+                if name not in known_names:
+                    # If __getattr__ uses ``if name in __all__``, all names
+                    # in __all__ are resolved lazily — not a mismatch.
+                    if getattr_resolves_all:
+                        continue
+                    mod_issues.append({
+                        "module": mod_name,
+                        "check": "ALL_MISMATCH",
+                        "severity": "error",
+                        "message": f"__all__ lists '{name}' but it is not imported or defined",
+                        "line": all_line,
+                    })
+
+        # ORPHAN_IMPORT — from-imported but not in __all__
+        if has_all:
+            for name in sorted(from_imported_names):
+                if name not in all_names:
+                    # Suppress infrastructure imports that are never package exports
+                    if name in _INFRA_IMPORT_NAMES:
+                        continue
+                    mod_issues.append({
+                        "module": mod_name,
+                        "check": "ORPHAN_IMPORT",
+                        "severity": "info",
+                        "message": f"from-import '{name}' not listed in __all__",
+                        "line": None,
+                    })
+
+        if not mod_issues:
+            clean_packages += 1
+        issues.extend(mod_issues)
+
+    return {
+        "issues": issues,
+        "packages_checked": packages_checked,
+        "clean_packages": clean_packages,
+        "total_issues": len(issues),
+    }
+
+
+def _is_bare_code(node: ast.AST, getattr_dict_names: set[str]) -> bool:
+    """Return True if *node* is a bare-code statement in ``__init__.py``.
+
+    Allowed top-level statements:
+    - ``from X import Y`` (ImportFrom)
+    - ``import X`` (Import — flagged separately as NON_FROM_IMPORT but not bare code)
+    - ``__all__ = [...]`` (Assign to __all__)
+    - ``def __getattr__`` / ``def __dir__`` (FunctionDef)
+    - Module docstring (Expr with Constant string as first statement)
+    - Dict assignment where the name is referenced by __getattr__ (lazy map infra)
+    - Comments (not in AST)
+    """
+    # Imports — always allowed
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return False
+
+    # Function defs: __getattr__, __dir__ allowed; others are bare code
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if node.name in ("__getattr__", "__dir__"):
+            return False
+        return True
+
+    # Class defs — bare code in __init__
+    if isinstance(node, ast.ClassDef):
+        return True
+
+    # Assignments
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                # __all__ is allowed
+                if target.id == "__all__":
+                    return False
+                # __version__ is standard package metadata
+                if target.id == "__version__":
+                    return False
+                # Dict assignments used by __getattr__ are allowed
+                if target.id in getattr_dict_names and isinstance(
+                    node.value, ast.Dict
+                ):
+                    return False
+        # Any other assignment is bare code
+        return True
+
+    # Expression statements — only module docstring allowed
+    if isinstance(node, ast.Expr):
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return False  # docstring
+        return True
+
+    # If/Try/With etc. — bare code
+    if isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
+        return True
+
+    return False
+
+
+def _describe_node(node: ast.AST) -> str:
+    """Return a short description of an AST node for diagnostic messages."""
+    if isinstance(node, ast.ClassDef):
+        return f"class {node.name}"
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return f"def {node.name}()"
+    if isinstance(node, ast.Assign):
+        targets = []
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                targets.append(t.id)
+            else:
+                targets.append(ast.unparse(t))
+        return f"assignment: {', '.join(targets)} = ..."
+    if isinstance(node, ast.Expr):
+        return "expression statement"
+    if isinstance(node, ast.If):
+        return "if statement"
+    if isinstance(node, ast.Try):
+        return "try/except block"
+    return type(node).__name__
