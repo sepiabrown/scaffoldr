@@ -109,13 +109,26 @@ def generate_dependency_graph(
                 graph[mod_name].add(target)
 
     # Compute package-level summary (collapse to facade-zone level)
+    #
+    # Skip parent↔child edges: when one facade zone is an ancestor of
+    # the other (e.g. ``dataset`` and ``dataset.manager``), the edge is
+    # a Python packaging artifact, not an architectural dependency.
+    # Parent→child edges are facade re-exports (``from .child import X``).
+    # Child→parent edges happen when a child module's sibling import
+    # (``from ..sibling``) resolves to a leaf module that zones to the
+    # parent facade.  Both directions are inherent to Python's package
+    # system and should not be reported as circular dependencies.
     pkg_graph: dict[str, set[str]] = defaultdict(set)
     for mod, deps in graph.items():
         src_pkg = _to_facade_zone(mod, facade_set)
         for dep in deps:
             dst_pkg = _to_facade_zone(dep, facade_set)
-            if src_pkg != dst_pkg:
-                pkg_graph[src_pkg].add(dst_pkg)
+            if src_pkg == dst_pkg:
+                continue
+            # Skip parent↔child edges within the same package tree
+            if dst_pkg.startswith(src_pkg + ".") or src_pkg.startswith(dst_pkg + "."):
+                continue
+            pkg_graph[src_pkg].add(dst_pkg)
 
     return {
         "module_level": {k: sorted(v) for k, v in sorted(graph.items())},
